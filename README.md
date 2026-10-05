@@ -10,7 +10,7 @@ Kiro IDE sub-agent command orchestrations fail with a synthetic `Exit Code: -1` 
 
 To confirm whether your sub-agent failures stem from missing terminal integration hooks in non-interactive subshells, simulate the exact invocation environment Kiro uses for automated tasks.
 
-Run this test command in your standard terminal:
+Run this test command in your standard terminal once the error occurs:
 
 ```zsh
 zsh -c 'echo "Integration: $VSCODE_SHELL_INTEGRATION"; typeset -f __vsc_precmd __vsc_preexec'
