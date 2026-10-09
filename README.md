@@ -1,12 +1,10 @@
-# Resolving Kiro IDE "Exit Code: -1" Sub-Agent Failures via `~/.zshenv`
+# Resolving Kiro IDE "Exit Code: -1" Sub-Agent Failures
 
-## 1. Issue Summary
+## Issue #1 - missing non-interactive subshell integration
 
 Kiro IDE sub-agent command orchestrations fail with a synthetic `Exit Code: -1` when non-interactive subshells lack the `VSCODE_SHELL_INTEGRATION` hooks (`__vsc_precmd`, `__vsc_preexec`) expected by the IDE's process runner. In consequence, the agent gets stuck trying to execute the command over and over again showing "working..." status.
 
----
-
-## 2. Verification and Testing
+### 1. Verification and Testing
 
 To confirm whether your sub-agent failures stem from missing terminal integration hooks in non-interactive subshells, simulate the exact invocation environment Kiro uses for automated tasks.
 
@@ -16,13 +14,12 @@ Run this test command in your standard terminal once the error occurs:
 zsh -c 'echo "Integration: $VSCODE_SHELL_INTEGRATION"; typeset -f __vsc_precmd __vsc_preexec'
 ```
 
-## Diagnosing the Output
+### 2. Diagnosing the Output
 
 - The Issue is Present if: VSCODE_SHELL_INTEGRATION is blank/unset and typeset returns function \_\_vsc_precmd not found.
-
 - The Issue is Resolved if: Integration: 1 is printed and both **vsc_precmd and **vsc_preexec output defined function bodies.
 
-## 3. The ~/.zshenv Workaround
+### 3. Workaround
 
 Since Zsh skips ~/.zshrc during non-interactive execution (zsh -c "command"), inject the missing environment variables and hooks into ~/.zshenv, which Zsh always sources regardless of shell mode.
 
@@ -55,13 +52,12 @@ fi
 unset kiro_script
 ```
 
-## 4. Alternative Workaround
+### 4. Alternative Workaround
 
 Agent can be informed about the problem and instructed how to deal with missing shell integration.
-
 Place `shell-exit-code-workaround.md` steering file either on the project level or main Kiro folder (recommended) `./kiro/steering/shell-exit...md`.
 
-## 5. Why Shell Commands Return Exit Code -1
+### 5. Why Shell Commands Return Exit Code -1
 
 **The Root Cause: Interactive Terminal IPC vs. Raw Subshells**
 
@@ -96,3 +92,46 @@ When a sub-agent runs without these hooks:
 3. Kiro's IPC observer waits for the signal, times out, assumes the execution channel hung or crashed unexpectedly, and outputs a synthetic -1 exit status.
 
 By enforcing VSCODE_SHELL_INTEGRATION=1 and guaranteeing \_\_vsc_precmd exists inside ~/.zshenv, the subshell satisfies Kiro's event runner, enabling automated sub-agent tasks to complete without requiring IDE source code modifications.
+
+---
+---
+---
+---
+
+## Issue #2 - Exit Code: -1 on commands longer than ~2s (not caused by missing shell integration hooks)
+
+Any agent or sub-agent shell command that takes more than roughly two seconds is abandoned by the runner. Output is truncated at the cutoff and the call reports Exit Code: -1. The agent cannot tell that a build or test finished, so it retries the same command and sits in a "working..." state. Attempting to wait with sleep N makes it worse: the sleep consumes the whole budget, so everything after it never reports and output comes back empty.
+
+```
+sleep 55; cd ~/project && grep -E "EXIT=|Test Files" /tmp/t1.log; tail -4 /tmp/t1.log
+Output:
+
+Exit Code: -1
+```
+
+### 1. Measured behavior:
+
+```
+command	                                                    result
+date; sleep 1; echo ok; date	                            full output, exit 0
+date; sleep 2; echo ok; date	                            full output, exit -1
+date; sleep 8; echo ok; date	                            truncated after first line, exit -1
+date; for i in 1..6; do echo tick $i; sleep 1; done; date	truncated at tick 3, exit -1
+date; python3 -c "<5s busy loop>"; date	                    truncated, exit -1
+```
+
+### 2. What this rules out
+
+1. Not the sleep builtin or binary. A pure CPU busy-loop with no sleep call at all fails identically, so the trigger is wall-clock duration.
+2. Not the tool's timeout parameter. Re-running the 8s case with an explicit 30s timeout produced the same truncation and -1.
+3. Not missing __vsc_precmd / __vsc_preexec. The shell that fails already has the real hooks loaded and registered by Kiro's own injection, with VSCODE_INJECTION=1, KIRO_SHELL_INTEGRATION=1, TERM_PROGRAM=kiro, in an interactive shell:
+
+```
+precmd_functions=_omz_async_request omz_termsupport_precmd omz_termsupport_cwd __vsc_precmd
+preexec_functions=omz_termsupport_preexec __vsc_preexec
+```
+
+### 3. Workaround
+
+Steering file: exit-code-minus-1.md. Move the fix to the invocation level rather than the shell. Three rules: never wait in the foreground; background the build or test and poll with commands that each finish under two seconds; append an EXIT=$? sentinel so completion and the real status are read from the log rather than from the runner.
+
